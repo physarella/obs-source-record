@@ -2756,12 +2756,15 @@ static obs_output_t *active_file_output(obs_source_t *filter)
 	return output && obs_output_active(output) ? output : NULL;
 }
 
+/* Combined filters share one output: a second split request arriving after
+ * the first was carried out would cut an extra, tiny file. */
 static void split_filter(obs_source_t *filter, void *param)
 {
-	UNUSED_PARAMETER(param);
+	DARRAY(obs_output_t *) *already_split = param;
 	obs_output_t *output = active_file_output(filter);
-	if (!output)
+	if (!output || da_find(*already_split, &output, 0) != DARRAY_INVALID)
 		return;
+	da_push_back(*already_split, &output);
 	struct calldata cd;
 	calldata_init(&cd);
 	proc_handler_call(obs_output_get_proc_handler(output), "split_file", &cd);
@@ -2770,7 +2773,9 @@ static void split_filter(obs_source_t *filter, void *param)
 
 void source_record_split_all(void)
 {
-	for_each_filter(split_filter, NULL);
+	DARRAY(obs_output_t *) already_split = {0};
+	for_each_filter(split_filter, &already_split);
+	da_free(already_split);
 }
 
 static void note_recording(obs_source_t *filter, void *param)

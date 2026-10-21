@@ -10,8 +10,12 @@
 
 #include "source-record.h"
 
+/* Missing from the OBS 29 headers the Windows and macOS builds use. */
 #ifndef MAX_OUTPUT_VIDEO_ENCODERS
 #define MAX_OUTPUT_VIDEO_ENCODERS 10
+#endif
+#ifndef MAX_OUTPUT_AUDIO_ENCODERS
+#define MAX_OUTPUT_AUDIO_ENCODERS 6
 #endif
 
 /* Members that start within this window share the first file instead of

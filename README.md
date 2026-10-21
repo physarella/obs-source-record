@@ -95,6 +95,10 @@ that moment, and turned into an ordinary MP4 when recording stops.
   because a running file cannot take new tracks.
 - Each source still has its own encoder and settings; the file just holds all
   of them.
+- Split and Split All cut the whole file. The cut lands on a keyframe of the
+  first track, so give every source in the file the same keyframe interval;
+  otherwise the other tracks of the new file start mid-picture until their
+  next keyframe.
 
 In Blender's Video Sequencer, add the file once per video track and set each
 movie strip's *Stream Index* (0, 1, ...) in the strip's Source panel. A sound

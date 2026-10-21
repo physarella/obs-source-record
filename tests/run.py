@@ -602,6 +602,44 @@ def case_combined_file_has_track_per_source(obs):
         check(not obs.files(name), f"{name} also wrote its own file")
 
 
+def video_starts_clean(path, index):
+    """The track's first frame is a keyframe and the track decodes without errors."""
+    first = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", f"v:{index}", "-read_intervals", "%+#1",
+         "-show_entries", "frame=key_frame", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    frames = json.loads(first.stdout or "{}").get("frames", [])
+    decode = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", f"0:v:{index}", "-f", "null", "-"],
+                            capture_output=True, text=True)
+    return bool(frames) and frames[0].get("key_frame") == 1 and not decode.stderr.strip()
+
+
+def case_combined_file_split_all(obs):
+    """Split All on a combined recording: two finished files, every track of
+    both starting on a keyframe."""
+    shared = {"path": str(obs.out / "Combined Split"), "record_mode": RECORD_MODE_MANUAL, "combined_file": True}
+    obs.add_color_source("Split Red", size=(320, 240), color=RED)
+    obs.add_color_source("Split Blue", size=(640, 360), color=BLUE)
+    obs.add_filter("Split Red", "Source Record", **shared)
+    obs.add_filter("Split Blue", "Source Record", **shared)
+    obs.hotkey("source_record.Start")
+    check(wait_until(lambda: obs.files("Combined Split"), 5), "no combined file appeared")
+    time.sleep(3)
+    obs.hotkey("source_record.SplitAll")
+    time.sleep(3)
+    obs.hotkey("source_record.Stop")
+    files = wait_for_files(obs, "Combined Split", 2)
+    check(len(files) == 2, f"expected 2 files after one split, got {[f.name for f in files]}")
+    for f in files:
+        check(wait_until(lambda: mp4_finished(f), 5), f"{f.name} was not finalised")
+        video = [s for s in probe_streams(f) if s["codec_type"] == "video"]
+        check(len(video) == 2, f"{f.name}: expected 2 video tracks, got {len(video)}")
+        for index in range(2):
+            check(video_starts_clean(f, index), f"{f.name}: video track {index} does not start on a keyframe")
+
+
 def case_combined_file_finished_on_exit(obs):
     """Quitting OBS mid-recording must finish the combined file, not hang."""
     obs.add_color_source("Exit Red", color=RED)
