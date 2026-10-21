@@ -170,6 +170,7 @@ class Obs:
             try:
                 self.proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
+                self.dump_threads()
                 self.proc.kill()
                 self.proc.wait()
                 raise Failure("OBS hung on shutdown")
@@ -239,6 +240,14 @@ class Obs:
                     return int(line.split()[1])
         return 0
 
+    def dump_threads(self):
+        """Every thread's stack, for when OBS hangs."""
+        out = self.workdir / "hang-backtrace.txt"
+        with open(out, "w") as f:
+            subprocess.run(["gdb", "-p", str(self.proc.pid), "-batch", "-ex", "thread apply all bt 30"],
+                           stdout=f, stderr=subprocess.STDOUT, timeout=120)
+        print(f"      OBS hung; thread stacks in {out}", flush=True)
+
     def leaks(self):
         """The leak count OBS logs on exit, or None if it never got that far."""
         for log in sorted((self.config / "obs-studio" / "logs").glob("*.txt")):
@@ -257,14 +266,14 @@ class Obs:
         )
         return reply["responseData"]
 
-    def add_color_source(self, name, size=CANVAS, visible=True):
+    def add_color_source(self, name, size=CANVAS, visible=True, color=0xFF3366CC):
         self.request(
             "CreateInput",
             {
                 "sceneName": "Scene",
                 "inputName": name,
                 "inputKind": "color_source_v3",
-                "inputSettings": {"color": 0xFF3366CC, "width": size[0], "height": size[1]},
+                "inputSettings": {"color": color, "width": size[0], "height": size[1]},
                 "sceneItemEnabled": visible,
             },
         )
@@ -316,6 +325,16 @@ def press_key(key):
     subprocess.run(["xdotool", "keydown", key], env=env, check=True)
     time.sleep(0.2)
     subprocess.run(["xdotool", "keyup", key], env=env, check=True)
+
+
+def probe_streams(path):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-count_frames", "-show_entries",
+         "stream=codec_type,width,height,nb_read_frames,start_time,duration:stream_tags", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout or "{}").get("streams", [])
 
 
 def decodable_frames(path):
@@ -535,6 +554,73 @@ def case_crash_safe_formats_readable_while_recording(obs):
     check(not unreadable, f"not readable while recording: {unreadable}")
 
 
+def mp4_finished(path):
+    """A Hybrid MP4 swaps the iso6 brand for obs1 when it is finalised."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format_tags=compatible_brands", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    brands = json.loads(result.stdout or "{}").get("format", {}).get("tags", {}).get("compatible_brands", "")
+    return "obs1" in brands
+
+
+# Checks that can only run once OBS has exited.
+AFTER_EXIT = []
+
+RED = 0xFF0000FF  # OBS colours are ABGR
+BLUE = 0xFFFF0000
+
+
+def case_combined_file_has_track_per_source(obs):
+    """Filters with "combined" set share one Hybrid MP4, one video and one
+    audio track per source, in source-name order."""
+    shared = {"path": str(obs.out / "Combined"), "record_mode": RECORD_MODE_MANUAL, "combined_file": True}
+    obs.add_color_source("Combined Red", size=(320, 240), color=RED)
+    obs.add_color_source("Combined Blue", size=(640, 360), color=BLUE)
+    obs.add_filter("Combined Red", "Source Record", **shared)
+    obs.add_filter("Combined Blue", "Source Record", **shared)
+    obs.hotkey("source_record.Start")
+    check(wait_until(lambda: obs.files("Combined"), 5), "no combined file appeared")
+    time.sleep(3)
+    obs.hotkey("source_record.Stop")
+    files = wait_for_files(obs, "Combined", 1)
+    check(len(files) == 1 and files[0].suffix == ".mp4", f"expected one mp4, got {[f.name for f in files]}")
+    check(wait_until(lambda: mp4_finished(files[0]), 5), "the combined file was not finalised after Stop")
+    streams = probe_streams(files[0])
+    print("      " + "; ".join(f"{s['codec_type']} {s.get('width', '')}x{s.get('height', '')} "
+                              f"{s.get('nb_read_frames')} {s.get('tags', {})}" for s in streams))
+    video = [(s["width"], s["height"]) for s in streams if s["codec_type"] == "video"]
+    audio = [s for s in streams if s["codec_type"] == "audio"]
+    check(video == [(640, 360), (320, 240)], f"video tracks: {video}")
+    check(len(audio) == 2, f"expected 2 audio tracks, got {len(audio)}")
+    timing = [(float(s["start_time"]), float(s["duration"])) for s in streams if s["codec_type"] == "video"]
+    starts = [t[0] for t in timing]
+    ends = [t[0] + t[1] for t in timing]
+    check(max(starts) - min(starts) < 0.1 and max(ends) - min(ends) < 0.1, f"video tracks out of step: {timing}")
+    for name in ("Combined Red", "Combined Blue"):
+        check(not obs.files(name), f"{name} also wrote its own file")
+
+
+def case_combined_file_finished_on_exit(obs):
+    """Quitting OBS mid-recording must finish the combined file, not hang."""
+    obs.add_color_source("Exit Red", color=RED)
+    obs.add_color_source("Exit Blue", size=(640, 360), color=BLUE)
+    for name in ("Exit Red", "Exit Blue"):
+        obs.add_filter(name, "Source Record", path=str(obs.out / "Exit"), record_mode=RECORD_MODE_ALWAYS,
+                       combined_file=True)
+    check(wait_until(lambda: obs.files("Exit"), 5), "no combined file appeared")
+    time.sleep(2)
+
+    def finished_after_exit():
+        files = obs.files("Exit")
+        check(len(files) == 1 and mp4_finished(files[0]), f"not finalised at exit: {[f.name for f in files]}")
+        video = [s for s in probe_streams(files[0]) if s["codec_type"] == "video"]
+        check(len(video) == 2, f"expected 2 video tracks, got {len(video)}")
+
+    AFTER_EXIT.append(("combined_file_finished_on_exit", finished_after_exit))
+
+
 def case_startup_shutdown(obs):
     """Baseline: OBS with one plain source must start and exit cleanly."""
     obs.add_color_source("Idle Cam")
@@ -607,7 +693,14 @@ def main():
     if exit_code:
         failures.append("shutdown")
         print(f"FAIL  shutdown: OBS exited with {exit_code}")
-    elif obs.proc:
+    for name, after_exit in AFTER_EXIT:
+        try:
+            after_exit()
+            print(f"PASS  {name} (after exit)")
+        except Failure as e:
+            failures.append(name)
+            print(f"FAIL  {name} (after exit): {e}")
+    if obs.proc and not exit_code:
         leaks = obs.leaks()
         if leaks != 0:
             failures.append("leaks")

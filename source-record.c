@@ -25,44 +25,6 @@
 #define BACKGROUND_CHANNEL 0
 #define SOURCE_CHANNEL 1
 
-struct source_record_filter_context {
-	obs_source_t *source;
-	video_t *video_output;
-	audio_t *audio_output;
-	bool output_active;
-	uint32_t width;
-	uint32_t height;
-	uint64_t last_frame_time_ns;
-	obs_view_t *view;
-	bool starting_file_output;
-	bool starting_stream_output;
-	bool starting_replay_output;
-	bool restart;
-	obs_output_t *fileOutput;
-	obs_output_t *streamOutput;
-	obs_output_t *replayOutput;
-	obs_encoder_t *encoder;
-	obs_encoder_t *audioEncoder[MAX_AUDIO_MIXES];
-	obs_service_t *service;
-	bool record;
-	bool stream;
-	bool replayBuffer;
-	obs_hotkey_pair_id enableHotkey;
-	obs_hotkey_pair_id pauseHotkeys;
-	obs_hotkey_id splitHotkey;
-	obs_hotkey_id chapterHotkey;
-	obs_hotkey_id saveReplayHotkey;
-	int audio_track;
-	obs_weak_source_t *audio_source;
-	bool closing;
-	bool exiting;
-	long long replay_buffer_duration;
-	struct vec4 backgroundColor;
-	bool remove_after_record;
-	long long record_max_seconds;
-	int last_frontend_event;
-};
-
 DARRAY(obs_source_t *) source_record_filters;
 
 static void *vendor;
@@ -272,6 +234,12 @@ static const char *GetFormatExt(const char *format)
 	if (strcmp(format, "mpegts") == 0)
 		return "ts";
 	return format;
+}
+
+/* The output recording this filter's file: its own, or the shared combined one. */
+static obs_output_t *recording_output(struct source_record_filter_context *context)
+{
+	return context->fileOutput ? context->fileOutput : combined_output(context);
 }
 
 static void start_file_output_task(void *data)
@@ -533,7 +501,7 @@ static void update_video_encoder(struct source_record_filter_context *filter, ob
 /* Two filters with the same folder and filename format would write the same
  * file. An exclusive create claims a name even when both start at once; the
  * output then writes over the empty file. Suffixes match OBS's own outputs. */
-static void claim_unique_path(struct dstr *path)
+void claim_unique_path(struct dstr *path)
 {
 	const char *dot = strrchr(path->array, '.');
 	const size_t ext_start = dot ? (size_t)(dot - path->array) : path->len;
@@ -559,8 +527,21 @@ static void claim_unique_path(struct dstr *path)
 	dstr_free(&candidate);
 }
 
+static void join_combined(struct source_record_filter_context *filter)
+{
+	combined_join(filter);
+	if (!filter->output_active) {
+		filter->output_active = true;
+		obs_source_inc_showing(obs_filter_get_parent(filter->source));
+	}
+}
+
 static void start_file_output(struct source_record_filter_context *filter, obs_data_t *settings)
 {
+	if (filter->combined) {
+		join_combined(filter);
+		return;
+	}
 	obs_data_t *s = obs_data_create();
 	const char *format = obs_data_get_string(settings, "rec_format");
 	char *filename =
@@ -982,6 +963,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		}
 	}
 	filter->remove_after_record = obs_data_get_bool(settings, "remove_after_record");
+	filter->combined = obs_data_get_bool(settings, "combined_file") && combined_available();
 	filter->record_max_seconds = obs_data_get_int(settings, "record_max_seconds");
 	const long long record_mode = obs_data_get_int(settings, "record_mode");
 	const long long stream_mode = obs_data_get_int(settings, "stream_mode");
@@ -1023,6 +1005,8 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		if (record) {
 			if (obs_source_enabled(filter->source) && filter->video_output)
 				start_file_output(filter, settings);
+		} else if (filter->in_combined) {
+			combined_leave(filter, filter->closing);
 		} else if (filter->fileOutput) {
 			if (filter->closing) {
 				stop_output_sync(filter, filter->fileOutput);
@@ -1037,13 +1021,13 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		filter->record = record;
 	}
 
-	if (record && filter->fileOutput && filter->last_frontend_event == OBS_FRONTEND_EVENT_RECORDING_PAUSED &&
-	    !obs_output_paused(filter->fileOutput)) {
-		obs_output_pause(filter->fileOutput, true);
+	if (record && recording_output(filter) && filter->last_frontend_event == OBS_FRONTEND_EVENT_RECORDING_PAUSED &&
+	    !obs_output_paused(recording_output(filter))) {
+		obs_output_pause(recording_output(filter), true);
 		filter->last_frontend_event = -1;
-	} else if (record && filter->fileOutput && filter->last_frontend_event == OBS_FRONTEND_EVENT_RECORDING_UNPAUSED &&
-		   obs_output_paused(filter->fileOutput)) {
-		obs_output_pause(filter->fileOutput, false);
+	} else if (record && recording_output(filter) && filter->last_frontend_event == OBS_FRONTEND_EVENT_RECORDING_UNPAUSED &&
+		   obs_output_paused(recording_output(filter))) {
+		obs_output_pause(recording_output(filter), false);
 		filter->last_frontend_event = -1;
 	}
 
@@ -1275,6 +1259,7 @@ static void source_record_filter_destroy(void *data)
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
 
+	combined_leave(context, true);
 	stop_output_sync(context, context->fileOutput);
 	stop_output_sync(context, context->streamOutput);
 	stop_output_sync(context, context->replayOutput);
@@ -1369,10 +1354,10 @@ static bool source_record_pause_hotkey(void *data, obs_hotkey_pair_id id, obs_ho
 	if (!pressed)
 		return false;
 
-	if (obs_output_paused(context->fileOutput))
+	if (obs_output_paused(recording_output(context)))
 		return false;
 
-	obs_output_pause(context->fileOutput, true);
+	obs_output_pause(recording_output(context), true);
 	return true;
 }
 
@@ -1383,10 +1368,10 @@ static bool source_record_unpause_hotkey(void *data, obs_hotkey_pair_id id, obs_
 	struct source_record_filter_context *context = data;
 	if (!pressed)
 		return false;
-	if (!obs_output_paused(context->fileOutput))
+	if (!obs_output_paused(recording_output(context)))
 		return false;
 
-	obs_output_pause(context->fileOutput, false);
+	obs_output_pause(recording_output(context), false);
 	return true;
 }
 
@@ -1397,9 +1382,9 @@ static void source_record_split_hotkey(void *data, obs_hotkey_id id, obs_hotkey_
 	if (!pressed)
 		return;
 	struct source_record_filter_context *context = data;
-	if (!context->fileOutput)
+	if (!recording_output(context))
 		return;
-	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
+	proc_handler_t *ph = obs_output_get_proc_handler(recording_output(context));
 	struct calldata cd;
 	calldata_init(&cd);
 	proc_handler_call(ph, "split_file", &cd);
@@ -1413,9 +1398,9 @@ static void source_record_chapter_hotkey(void *data, obs_hotkey_id id, obs_hotke
 	if (!pressed)
 		return;
 	struct source_record_filter_context *context = data;
-	if (!context->fileOutput)
+	if (!recording_output(context))
 		return;
-	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
+	proc_handler_t *ph = obs_output_get_proc_handler(recording_output(context));
 	struct calldata cd;
 	calldata_init(&cd);
 	proc_handler_call(ph, "add_chapter", &cd);
@@ -1563,6 +1548,8 @@ static void source_record_filter_tick(void *data, float seconds)
 	}
 
 	if (context->restart && context->output_active) {
+		if (context->in_combined)
+			combined_leave(context, false);
 		if (context->fileOutput) {
 			struct stop_output *so = bmalloc(sizeof(struct stop_output));
 			so->output = context->fileOutput;
@@ -1629,6 +1616,8 @@ static void source_record_filter_tick(void *data, float seconds)
 			start_replay_output(context, s);
 		obs_data_release(s);
 	} else if (context->output_active && !wanted) {
+		if (context->in_combined)
+			combined_leave(context, false);
 		if (context->fileOutput) {
 			struct stop_output *so = bmalloc(sizeof(struct stop_output));
 			so->output = context->fileOutput;
@@ -1657,9 +1646,12 @@ static void source_record_filter_tick(void *data, float seconds)
 	if (!wanted && !context->output_active)
 		release_idle_view(context);
 
-	if (context->output_active && context->fileOutput && context->record_max_seconds) {
-		int totalFrames = obs_output_get_total_frames(context->fileOutput);
-		video_t *video = obs_output_video(context->fileOutput);
+	combined_poll();
+
+	obs_output_t *recording = context->output_active && context->record_max_seconds ? recording_output(context) : NULL;
+	if (recording) {
+		int totalFrames = obs_output_get_total_frames(recording);
+		video_t *video = obs_output_video(recording);
 		uint64_t frameTimeNs = video_output_get_frame_time(video);
 		long long msecs = util_mul_div64(totalFrames, frameTimeNs, 1000000ULL);
 		if (msecs >= context->record_max_seconds * 1000) {
@@ -1748,9 +1740,9 @@ static bool source_record_split_button(obs_properties_t *props, obs_property_t *
 	UNUSED_PARAMETER(props);
 	UNUSED_PARAMETER(property);
 	struct source_record_filter_context *context = data;
-	if (!context || !context->fileOutput)
+	if (!context || !recording_output(context))
 		return false;
-	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
+	proc_handler_t *ph = obs_output_get_proc_handler(recording_output(context));
 	struct calldata cd;
 	calldata_init(&cd);
 	proc_handler_call(ph, "split_file", &cd);
@@ -1816,6 +1808,11 @@ static obs_properties_t *source_record_filter_properties(void *data)
 				   source_record_split_button, data);
 
 	obs_properties_add_int(record, "record_max_seconds", obs_module_text("MaxSeconds"), 0, 31536000, 1);
+
+	if (combined_available() && output_exists("mp4_output")) {
+		p = obs_properties_add_bool(record, "combined_file", obs_module_text("CombinedFile"));
+		obs_property_set_long_description(p, obs_module_text("CombinedFile.Description"));
+	}
 
 	obs_properties_add_group(props, "record", obs_module_text("Record"), OBS_GROUP_NORMAL, record);
 
@@ -2010,6 +2007,7 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 	UNUSED_PARAMETER(parent);
 	struct source_record_filter_context *context = data;
 	context->closing = true;
+	combined_leave(context, true);
 	stop_output_sync(context, context->fileOutput);
 	stop_output_sync(context, context->streamOutput);
 	stop_output_sync(context, context->replayOutput);
@@ -2174,9 +2172,9 @@ static bool pause_record_source(obs_source_t *source, obs_data_t *request_data, 
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	obs_source_release(filter);
-	if (!context->fileOutput)
+	if (!recording_output(context))
 		return false;
-	obs_output_pause(context->fileOutput, true);
+	obs_output_pause(recording_output(context), true);
 	return true;
 }
 
@@ -2188,9 +2186,9 @@ static bool unpause_record_source(obs_source_t *source, obs_data_t *request_data
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	obs_source_release(filter);
-	if (!context->fileOutput)
+	if (!recording_output(context))
 		return false;
-	obs_output_pause(context->fileOutput, false);
+	obs_output_pause(recording_output(context), false);
 	return true;
 }
 
@@ -2202,9 +2200,9 @@ static bool split_record_source(obs_source_t *source, obs_data_t *request_data, 
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	obs_source_release(filter);
-	if (!context->fileOutput)
+	if (!recording_output(context))
 		return false;
-	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
+	proc_handler_t *ph = obs_output_get_proc_handler(recording_output(context));
 	struct calldata cd;
 	calldata_init(&cd);
 	if (!proc_handler_call(ph, "split_file", &cd)) {
@@ -2223,9 +2221,9 @@ static bool add_chapter_record_source(obs_source_t *source, obs_data_t *request_
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	obs_source_release(filter);
-	if (!context->fileOutput)
+	if (!recording_output(context))
 		return false;
-	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
+	proc_handler_t *ph = obs_output_get_proc_handler(recording_output(context));
 	struct calldata cd;
 	calldata_init(&cd);
 	calldata_set_string(&cd, "chapter_name", obs_data_get_string(request_data, "chapter_name"));
@@ -2754,9 +2752,8 @@ void source_record_update_all(void)
 static obs_output_t *active_file_output(obs_source_t *filter)
 {
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
-	if (!context || !context->fileOutput || !obs_output_active(context->fileOutput))
-		return NULL;
-	return context->fileOutput;
+	obs_output_t *output = context ? recording_output(context) : NULL;
+	return output && obs_output_active(output) ? output : NULL;
 }
 
 static void split_filter(obs_source_t *filter, void *param)
@@ -2826,12 +2823,14 @@ void obs_module_post_load(void)
 			(bool (*)(obs_encoder_t *, uint32_t))os_dlsym(handle, "obs_encoder_set_frame_rate_divisor");
 		obs_encoder_set_gpu_scale_type_func =
 			(void (*)(obs_encoder_t *, enum obs_scale_type))os_dlsym(handle, "obs_encoder_set_gpu_scale_type");
+		combined_load(handle);
 		os_dlclose(handle);
 	}
 }
 
 void obs_module_unload(void)
 {
+	combined_unload();
 	source_record_controls_unload();
 	da_free(source_record_filters);
 }

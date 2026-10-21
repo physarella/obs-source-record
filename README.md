@@ -21,6 +21,10 @@ New:
   recording during a stream and Start a new file without touching the stream.
   The pause ends on Start, or when streaming, recording or the virtual camera
   next starts.
+- **One file for several sources.** Tick *Record into one combined file* on
+  each filter that should share it: they record into a single Hybrid MP4
+  with one video and one audio track per source, each track named after its
+  source. Needs OBS 30.2 or later. See [One combined file](#one-combined-file).
 - **Save Replay hotkey per source,** so Source Record replay buffers can be
   bound with [obs-wayland-hotkeys](https://github.com/leia-uwu/obs-wayland-hotkeys)
   on Wayland.
@@ -75,6 +79,34 @@ Downloads are on the [Releases](https://github.com/physarella/obs-source-record/
 
 The Linux build is tested against OBS 32.1.2 by `tests/run.py`. The Windows
 and macOS builds come from CI and have not been tested by hand.
+
+## One combined file
+
+Every filter with *Record into one combined file* ticked records into the
+same file while it records, whatever its record mode. The file is a Hybrid
+MP4: written in fragments while recording, so a crash keeps everything up to
+that moment, and turned into an ordinary MP4 when recording stops.
+
+- Tracks are in alphabetical order of source name, and each is named after
+  its source.
+- The folder and filename pattern come from the first source alphabetically.
+  The format setting of the filters is not used.
+- A source joining or leaving finishes the current file and starts a new one,
+  because a running file cannot take new tracks.
+- Each source still has its own encoder and settings; the file just holds all
+  of them.
+
+In Blender's Video Sequencer, add the file once per video track and set each
+movie strip's *Stream Index* (0, 1, ...) in the strip's Source panel. A sound
+strip always plays the first audio track. To use another one, copy it out
+without re-encoding:
+
+```sh
+ffmpeg -i recording.mp4 -map 0:a:1 -c copy track2.m4a
+```
+
+Set the scene to the recording's frame rate, or movie and sound strips will
+not line up.
 
 ## Hotkeys
 

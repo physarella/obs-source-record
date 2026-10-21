@@ -41,6 +41,7 @@
           pkgs.xvfb
           pkgs.xdotool
           pkgs.ffmpeg-headless
+          pkgs.gdb
           nixgl.packages.${system}.nixGLIntel
         ];
         OBS_STUDIO = "${pkgs.obs-studio}";
