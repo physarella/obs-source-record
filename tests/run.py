@@ -486,6 +486,25 @@ def case_stop_and_restart_while_streaming(obs):
     check(len(files) == 2, f"expected 2 files, got {[f.name for f in files]}")
 
 
+def case_same_filename_does_not_collide(obs):
+    """Upstream #181/#105: two filters with one folder and filename format
+    wrote the same file, losing one recording."""
+    shared = {"path": str(obs.out / "Shared"), "filename_formatting": "shared name"}
+    for name in ("Twin A", "Twin B"):
+        obs.add_color_source(name)
+        obs.add_filter(name, "Source Record", **shared)
+    for name in ("Twin A", "Twin B"):
+        obs.set_filter(name, "Source Record", record_mode=RECORD_MODE_ALWAYS)
+    time.sleep(3)
+    for name in ("Twin A", "Twin B"):
+        obs.set_filter(name, "Source Record", record_mode=RECORD_MODE_NONE)
+    files = wait_for_files(obs, "Shared", 2)
+    names = [f.name for f in files]
+    check(names == ["shared name (2).mkv", "shared name.mkv"], f"expected two recordings, got {names}")
+    for f in files:
+        check((probe_duration(f) or 0) > 1, f"{f.name} is not a full recording")
+
+
 def case_startup_shutdown(obs):
     """Baseline: OBS with one plain source must start and exit cleanly."""
     obs.add_color_source("Idle Cam")

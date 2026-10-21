@@ -8,6 +8,8 @@
 #include "obs-websocket-api.h"
 #include "source-record.h"
 
+#include <errno.h>
+
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -528,17 +530,49 @@ static void update_video_encoder(struct source_record_filter_context *filter, ob
 		obs_output_set_video_encoder(filter->replayOutput, filter->encoder);
 }
 
+/* Two filters with the same folder and filename format would write the same
+ * file. An exclusive create claims a name even when both start at once; the
+ * output then writes over the empty file. Suffixes match OBS's own outputs. */
+static void claim_unique_path(struct dstr *path)
+{
+	const char *dot = strrchr(path->array, '.');
+	const size_t ext_start = dot ? (size_t)(dot - path->array) : path->len;
+	struct dstr ext;
+	dstr_init_copy(&ext, path->array + ext_start);
+	struct dstr candidate;
+	dstr_init_copy_dstr(&candidate, path);
+
+	for (int n = 2;; n++) {
+		FILE *f = os_fopen(candidate.array, "wbx");
+		if (f) {
+			fclose(f);
+			dstr_move(path, &candidate);
+			break;
+		}
+		if (errno != EEXIST)
+			break;
+		dstr_resize(&candidate, ext_start);
+		dstr_catf(&candidate, " (%d)", n);
+		dstr_cat_dstr(&candidate, &ext);
+	}
+	dstr_free(&ext);
+	dstr_free(&candidate);
+}
+
 static void start_file_output(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	obs_data_t *s = obs_data_create();
-	char path[512];
 	const char *format = obs_data_get_string(settings, "rec_format");
 	char *filename =
 		os_generate_formatted_filename(GetFormatExt(format), true, obs_data_get_string(settings, "filename_formatting"));
-	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"), filename);
+	struct dstr path;
+	dstr_init(&path);
+	dstr_printf(&path, "%s/%s", obs_data_get_string(settings, "path"), filename);
 	bfree(filename);
-	ensure_directory(path);
-	obs_data_set_string(s, "path", path);
+	ensure_directory(path.array);
+	claim_unique_path(&path);
+	obs_data_set_string(s, "path", path.array);
+	dstr_free(&path);
 	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(format));
