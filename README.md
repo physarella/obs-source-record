@@ -100,17 +100,9 @@ that moment, and turned into an ordinary MP4 when recording stops.
   otherwise the other tracks of the new file start mid-picture until their
   next keyframe.
 
-In Blender's Video Sequencer, add the file once per video track and set each
-movie strip's *Stream Index* (0, 1, ...) in the strip's Source panel. A sound
-strip always plays the first audio track. To use another one, copy it out
-without re-encoding:
-
-```sh
-ffmpeg -i recording.mp4 -map 0:a:1 -c copy track2.m4a
-```
-
-Set the scene to the recording's frame rate, or movie and sound strips will
-not line up.
+In Blender 5.2's Video Sequencer, Add > Movie loads every video and audio
+track of the file as its own strip, already lined up, with no further steps.
+Set the scene to the recording's frame rate first.
 
 ## Hotkeys
 
