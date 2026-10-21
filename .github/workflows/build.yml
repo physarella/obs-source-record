@@ -3,6 +3,7 @@ name: build obs plugin
 on:
   push:
     branches: [ master ]
+    tags: [ '*' ]
   pull_request:
     branches: [ master ]
 
@@ -127,55 +128,53 @@ jobs:
         with:
           name: ${{ env.PLUGIN_NAME }}-macos-${{ matrix.arch }}-${{ steps.setup.outputs.commitHash }}
           path: ${{ github.workspace }}/plugin/release/${{ env.PLUGIN_NAME }}-*-macos-${{ matrix.arch }}.pkg
-  linux-in-tree:
+  linux:
     name: 'Linux'
-    runs-on: ${{ matrix.ubuntu }}
-    strategy:
-      fail-fast: false
-      matrix:
-        ubuntu: ['ubuntu-22.04']
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4.1.1
-        with:
-          repository: obsproject/obs-studio
-          ref: ${{ env.OBS_VERSION }}
-          submodules: 'recursive'
-      - name: "Checkout plugin"
-        uses: actions/checkout@v4.1.1
-        with:
-          path: plugins/${{ env.PLUGIN_NAME }}
-      - name: Add plugin to obs cmake
-        shell: bash
-        run: echo "add_subdirectory(${{ env.PLUGIN_NAME }})" > plugins/CMakeLists.txt
-      - name: Fetch Git Tags
-        run: git fetch --prune --tags --unshallow
-      - name: 'Install dependencies'
-        run: CI/linux/01_install_dependencies.sh --disable-pipewire
-      - name: 'Configure'
-        shell: bash
+      # The PPA ships libobs and obs-frontend-api with their CMake files. A
+      # plugin built against OBS 29 links libobs.so.0, which OBS 30 and later
+      # no longer provide (their libobs is libobs.so.30).
+      - name: Install OBS Studio
         run: |
-          mkdir ./build
-          cmake -S . -B "./build" -G Ninja -DCMAKE_BUILD_TYPE="RelWithDebInfo" -DLINUX_PORTABLE=OFF -DENABLE_AJA=OFF -DENABLE_NEW_MPEGTS_OUTPUT=OFF -DBUILD_CAPTIONS=OFF -DWITH_RTMPS=OFF -DBUILD_BROWSER=OFF -DBUILD_VIRTUALCAM=OFF -DBUILD_VST=OFF -DENABLE_PIPEWIRE=OFF -DENABLE_SCRIPTING=OFF
-      - name: 'Build'
-        shell: bash
+          sudo add-apt-repository --yes ppa:obsproject/obs-studio
+          sudo apt-get update
+          sudo apt-get install --yes obs-studio cmake ninja-build
+      - name: Build
         run: |
-          cmake --build "./build"
-      - name: 'Package'
-        shell: bash
+          cmake -S . -B build -G Ninja -DBUILD_OUT_OF_TREE=On -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+      - name: Package
         run: |
-          FILE_DATE=$(date +%Y-%m-%d)
-          FILE_NAME=${{ env.PLUGIN_NAME }}-$FILE_DATE-${{ github.sha }}-${{ matrix.ubuntu }}.tar.gz
-          echo "FILE_NAME=${FILE_NAME}" >> $GITHUB_ENV
-          mkdir -p ./${{ env.PLUGIN_NAME }}/bin/64bit/
-          mv ./build/plugins/${{ env.PLUGIN_NAME }}/${{ env.PLUGIN_NAME }}.so ./${{ env.PLUGIN_NAME }}/bin/64bit/${{ env.PLUGIN_NAME }}.so
-          mv ./plugins/${{ env.PLUGIN_NAME }}/data ./${{ env.PLUGIN_NAME }}/data
-          tar -cvzf "${FILE_NAME}" ${{ env.PLUGIN_NAME }}
-      - name: 'Publish'
+          mkdir -p package/${{ env.PLUGIN_NAME }}/bin/64bit package/${{ env.PLUGIN_NAME }}/data
+          cp build/${{ env.PLUGIN_NAME }}.so package/${{ env.PLUGIN_NAME }}/bin/64bit/
+          cp -r data/locale package/${{ env.PLUGIN_NAME }}/data/
+          tar -C package -czf ${{ env.PLUGIN_NAME }}-linux-x86_64.tar.gz ${{ env.PLUGIN_NAME }}
+      - name: Publish
         uses: actions/upload-artifact@v4.3.1
         with:
-          name: '${{ env.FILE_NAME }}'
-          path: '*.tar.gz'
+          name: ${{ env.PLUGIN_NAME }}-linux-x86_64
+          path: ${{ env.PLUGIN_NAME }}-linux-x86_64.tar.gz
+  nix:
+    name: 'Nix build and integration tests'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.1.1
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+      - name: Build
+        run: nix build .#default --print-build-logs
+      - name: Test
+        run: nix develop --command python3 -I -u tests/run.py --plugin result
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4.3.1
+        with:
+          name: test-runs
+          path: tests/runs
   windows-build:
     name: 'Windows Build'
     runs-on: [windows-2022]
@@ -302,3 +301,32 @@ jobs:
         uses: geekyeggo/delete-artifact@v4.1.0
         with:
           name: "${{ env.FILE_NAME_X86 }}\n${{ env.FILE_NAME_X64 }}"
+  release:
+    name: 'Draft release'
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [macos, linux, nix, windows-package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download builds
+        uses: actions/download-artifact@v4.1.2
+        with:
+          path: artifacts
+      - name: Collect release files
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mkdir release
+          windows_dir=$(find artifacts -maxdepth 1 -type d -name '${{ env.PLUGIN_NAME }}-*-windows' | head -n 1)
+          (cd "$windows_dir" && zip -qr "${GITHUB_WORKSPACE}/release/${{ env.PLUGIN_NAME }}-${tag}-windows.zip" .)
+          cp artifacts/*-windows-installer/*.exe "release/${{ env.PLUGIN_NAME }}-${tag}-windows-installer.exe"
+          cp artifacts/${{ env.PLUGIN_NAME }}-linux-x86_64/*.tar.gz "release/${{ env.PLUGIN_NAME }}-${tag}-linux-x86_64.tar.gz"
+          for arch in x86_64 arm64 universal; do
+            cp artifacts/${{ env.PLUGIN_NAME }}-macos-${arch}-*/*.pkg "release/${{ env.PLUGIN_NAME }}-${tag}-macos-${arch}.pkg"
+          done
+          ls -l release
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release/* --draft --generate-notes --title "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}"
