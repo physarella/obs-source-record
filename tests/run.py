@@ -176,9 +176,16 @@ class Obs:
         self.log.close()
         return self.proc.returncode
 
-    def hotkey(self, name):
-        """Fires a hotkey the way obs-wayland-hotkeys does: press, then release."""
-        self.request("TriggerHotkeyByName", {"hotkeyName": name})
+    def hotkey(self, name, source=None):
+        """Fires a hotkey the way obs-wayland-hotkeys does: press, then release.
+        `source` selects a source's own hotkey."""
+        data = {"hotkeyName": name}
+        if source:
+            data["contextName"] = source
+        self.request("TriggerHotkeyByName", data)
+
+    def hotkey_names(self):
+        return self.request("GetHotkeyList")["hotkeys"]
 
     def recording(self):
         return self.request("GetRecordStatus")["outputActive"]
@@ -427,6 +434,20 @@ def case_saved_binding_survives_restart(obs):
     press_key("F9")
     files = wait_for_files(obs, "Key Cam", 1)
     check(len(files) == 1, f"F9 did not stop the recording: {[f.name for f in files]}")
+
+
+def case_save_replay_source_hotkey(obs):
+    """A Source Record replay buffer needs a hotkey on its source: the one on
+    its output shares OBS's name and obs-wayland-hotkeys keeps only one."""
+    obs.add_color_source("Replay Cam")
+    obs.add_filter("Replay Cam", "Source Record", replay_buffer=True, replay_duration=5,
+                   replay_filename_formatting="%CCYY-%MM-%DD %hh-%mm-%ss replay")
+    check(wait_until(lambda: "source_record.SaveReplay" in obs.hotkey_names(), 5), "no SaveReplay hotkey")
+    time.sleep(3)
+    obs.hotkey("source_record.SaveReplay", source="Replay Cam")
+    files = wait_for_files(obs, "Replay Cam", 1)
+    check(len(files) == 1 and "replay" in files[0].name, f"no replay was saved: {[f.name for f in files]}")
+    obs.set_filter("Replay Cam", "Source Record", replay_buffer=False)
 
 
 def case_split_all_hotkey(obs):
