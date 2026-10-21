@@ -1744,7 +1744,7 @@ static bool source_record_split_button(obs_properties_t *props, obs_property_t *
 	UNUSED_PARAMETER(props);
 	UNUSED_PARAMETER(property);
 	struct source_record_filter_context *context = data;
-	if (!context->fileOutput)
+	if (!context || !context->fileOutput)
 		return false;
 	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
 	struct calldata cd;
@@ -1806,10 +1806,10 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	p = obs_properties_add_int(split_file, "max_size_mb",
 				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 0, 1073741824, 1);
 	obs_property_int_set_suffix(p, " MB");
-	obs_properties_add_button(split_file, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
-				 source_record_split_button);
 	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
 				 OBS_GROUP_CHECKABLE, split_file);
+	obs_properties_add_button2(record, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
+				   source_record_split_button, data);
 
 	obs_properties_add_int(record, "record_max_seconds", obs_module_text("MaxSeconds"), 0, 31536000, 1);
 
