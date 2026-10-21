@@ -273,6 +273,19 @@ def case_split_keeps_spaces(obs):
         check(" Split Cam" in name, f"spaces were replaced in {name!r}")
 
 
+def case_manual_split_without_auto_split(obs):
+    """The split hotkey/button/request did nothing unless automatic splitting was on."""
+    obs.add_color_source("Manual Cam")
+    obs.add_filter("Manual Cam", "Source Record", split_file=False)
+    obs.set_filter("Manual Cam", "Source Record", record_mode=RECORD_MODE_ALWAYS)
+    time.sleep(2.5)
+    obs.vendor("record_split", {"source": "Manual Cam"})
+    time.sleep(2.5)
+    obs.set_filter("Manual Cam", "Source Record", record_mode=RECORD_MODE_NONE)
+    files = wait_for_files(obs, "Manual Cam", 2)
+    check(len(files) == 2, f"expected 2 files after a manual split, got {[f.name for f in files]}")
+
+
 def case_startup_shutdown(obs):
     """Baseline: OBS with one plain source must start and exit cleanly."""
     obs.add_color_source("Idle Cam")

@@ -532,9 +532,12 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(format));
 	obs_data_set_bool(s, "allow_spaces", true);
-	obs_data_set_bool(s, "split_file", obs_data_get_bool(settings, "split_file"));
-	obs_data_set_int(s, "max_size_mb", obs_data_get_int(settings, "max_size_mb"));
-	obs_data_set_int(s, "max_time_sec", obs_data_get_int(settings, "max_time_sec"));
+	/* The outputs ignore manual splits unless split_file is on, so it always
+	 * is; the checkbox only decides whether the size and time limits apply. */
+	const bool auto_split = obs_data_get_bool(settings, "split_file");
+	obs_data_set_bool(s, "split_file", true);
+	obs_data_set_int(s, "max_size_mb", auto_split ? obs_data_get_int(settings, "max_size_mb") : 0);
+	obs_data_set_int(s, "max_time_sec", auto_split ? obs_data_get_int(settings, "max_time_sec") : 0);
 
 	const char *output_id = "ffmpeg_muxer";
 	if (strcmp(format, "hybrid_mp4") == 0) {
