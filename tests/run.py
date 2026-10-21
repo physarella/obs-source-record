@@ -171,6 +171,20 @@ class Obs:
         self.log.close()
         return self.proc.returncode
 
+    def showing(self, source):
+        return self.request("GetSourceActive", {"sourceName": source})["videoShowing"]
+
+    def render_ms(self):
+        return self.request("GetStats")["averageFrameRenderTime"]
+
+    def remaining_sources(self):
+        """Sources OBS still held when it freed its context on exit."""
+        for log in sorted((self.config / "obs-studio" / "logs").glob("*.txt")):
+            for line in log.read_text(errors="replace").splitlines():
+                if "source(s) were remaining" in line:
+                    return int(line.split()[1])
+        return 0
+
     def leaks(self):
         """The leak count OBS logs on exit, or None if it never got that far."""
         for log in sorted((self.config / "obs-studio" / "logs").glob("*.txt")):
@@ -189,7 +203,7 @@ class Obs:
         )
         return reply["responseData"]
 
-    def add_color_source(self, name, size=CANVAS):
+    def add_color_source(self, name, size=CANVAS, visible=True):
         self.request(
             "CreateInput",
             {
@@ -197,7 +211,7 @@ class Obs:
                 "inputName": name,
                 "inputKind": "color_source_v3",
                 "inputSettings": {"color": 0xFF3366CC, "width": size[0], "height": size[1]},
-                "sceneItemEnabled": True,
+                "sceneItemEnabled": visible,
             },
         )
 
@@ -286,6 +300,41 @@ def case_manual_split_without_auto_split(obs):
     check(len(files) == 2, f"expected 2 files after a manual split, got {[f.name for f in files]}")
 
 
+def case_idle_filter_releases_source(obs):
+    """Upstream #38/#135: after one recording the source stayed shown and
+    rendered every frame, even hidden and with nothing recording."""
+    big = (1920, 1080)
+    obs.add_color_source("Hidden Cam", size=big, visible=False)
+    obs.add_filter("Hidden Cam", "Source Record")
+    time.sleep(2)
+    check(not obs.showing("Hidden Cam"), "a hidden source with an idle filter is shown before any recording")
+    idle_before = obs.render_ms()
+
+    obs.set_filter("Hidden Cam", "Source Record", record_mode=RECORD_MODE_ALWAYS)
+    check(wait_until(lambda: obs.showing("Hidden Cam"), 5), "the source is not shown while it records")
+    time.sleep(2)
+    obs.set_filter("Hidden Cam", "Source Record", record_mode=RECORD_MODE_NONE)
+    wait_for_files(obs, "Hidden Cam", 1)
+
+    released = wait_until(lambda: not obs.showing("Hidden Cam"), 5)
+    time.sleep(3)
+    idle_after = obs.render_ms()
+    print(f"      render time idle: {idle_before:.2f} ms before, {idle_after:.2f} ms after recording")
+    check(released, "the source is still shown after recording stopped")
+
+
+def case_deleted_source_is_freed(obs):
+    """Deleting a source mid-recording must finalize the file and free the source."""
+    obs.add_color_source("Deleted Cam")
+    obs.add_filter("Deleted Cam", "Source Record")
+    obs.set_filter("Deleted Cam", "Source Record", record_mode=RECORD_MODE_ALWAYS)
+    time.sleep(2)
+    obs.request("RemoveInput", {"inputName": "Deleted Cam"})
+    files = wait_for_files(obs, "Deleted Cam", 1)
+    check(len(files) == 1, f"expected the recording to be finalized, got {[f.name for f in files]}")
+    # Freed or not is only visible at exit: see remaining_sources().
+
+
 def case_startup_shutdown(obs):
     """Baseline: OBS with one plain source must start and exit cleanly."""
     obs.add_color_source("Idle Cam")
@@ -362,6 +411,10 @@ def main():
         if leaks != 0:
             failures.append("leaks")
             print(f"FAIL  leaks: OBS reported {leaks} memory leaks on exit")
+        remaining = obs.remaining_sources()
+        if remaining:
+            failures.append("remaining sources")
+            print(f"FAIL  remaining sources: {remaining} sources were never freed")
     print(f"work directory: {workdir}" if args.keep or failures else "")
     return 1 if failures else 0
 

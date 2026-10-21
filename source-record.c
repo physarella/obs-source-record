@@ -141,7 +141,8 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 {
 	UNUSED_PARAMETER(end_ts_in);
 	struct source_record_filter_context *filter = param;
-	if (filter->closing || obs_source_removed(filter->source)) {
+	const bool no_encoder_attached = !mixers;
+	if (no_encoder_attached || filter->closing || obs_source_removed(filter->source)) {
 		*out_ts = start_ts_in;
 		return true;
 	}
@@ -292,10 +293,17 @@ static void start_stream_output_task(void *data)
 	context->starting_stream_output = false;
 }
 
+static bool outputs_wanted(struct source_record_filter_context *context)
+{
+	obs_source_t *parent = obs_filter_get_parent(context->source);
+	return parent && !obs_source_removed(parent) && obs_source_enabled(context->source) &&
+	       (context->replayBuffer || context->record || context->stream);
+}
+
 static void release_encoders(void *param)
 {
 	struct source_record_filter_context *context = param;
-	if (context->source && obs_source_enabled(context->source) && (context->replayBuffer || context->record || context->stream))
+	if (context->source && outputs_wanted(context))
 		return;
 	if (context->encoder && !obs_encoder_active(context->encoder)) {
 		obs_encoder_release(context->encoder);
@@ -1367,6 +1375,30 @@ static void source_record_chapter_hotkey(void *data, obs_hotkey_id id, obs_hotke
 	calldata_free(&cd);
 }
 
+/* The view holds a reference to the parent and keeps it active, and OBS
+ * renders every view each frame whether or not anything encodes it. */
+static void release_idle_view(struct source_record_filter_context *context)
+{
+	if (!context->view || context->starting_file_output || context->starting_stream_output ||
+	    context->starting_replay_output)
+		return;
+
+	obs_source_t *view_source = obs_view_get_source(context->view, SOURCE_CHANNEL);
+	if (view_source) {
+		obs_view_set_source(context->view, SOURCE_CHANNEL, NULL);
+		obs_source_release(view_source);
+	}
+
+	/* An encoder that has run cannot be moved to a new video_t, so the
+	 * video_t may only go once the encoder is released. */
+	if (context->video_output && !context->encoder) {
+		obs_view_remove(context->view);
+		context->video_output = NULL;
+		context->width = 0;
+		context->height = 0;
+	}
+}
+
 static void source_record_filter_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
@@ -1414,8 +1446,9 @@ static void source_record_filter_tick(void *data, float seconds)
 	 * focus change) used to call obs_view_remove() immediately, freeing the
 	 * video_output under a running encoder + replay buffer -> crash. */
 	const bool size_changed = width && height && (context->width != width || context->height != height);
+	const bool wanted = outputs_wanted(context);
 
-	if (width && height && !context->video_output) {
+	if (width && height && !context->video_output && wanted) {
 		struct obs_video_info ovi = {0};
 		obs_get_video_info(&ovi);
 
@@ -1483,8 +1516,7 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->output_active = false;
 		context->restart = false;
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
-	} else if (!context->output_active && obs_source_enabled(context->source) &&
-		   (context->replayBuffer || context->record || context->stream)) {
+	} else if (!context->output_active && wanted) {
 		if (context->starting_file_output || context->starting_stream_output || context->starting_replay_output ||
 		    !context->video_output || !width || !height)
 			return;
@@ -1525,7 +1557,7 @@ static void source_record_filter_tick(void *data, float seconds)
 		if (context->replayBuffer)
 			start_replay_output(context, s);
 		obs_data_release(s);
-	} else if (context->output_active && !obs_source_enabled(context->source)) {
+	} else if (context->output_active && !wanted) {
 		if (context->fileOutput) {
 			struct stop_output *so = bmalloc(sizeof(struct stop_output));
 			so->output = context->fileOutput;
@@ -1550,6 +1582,9 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->output_active = false;
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
 	}
+
+	if (!wanted && !context->output_active)
+		release_idle_view(context);
 
 	if (context->output_active && context->fileOutput && context->record_max_seconds) {
 		int totalFrames = obs_output_get_total_frames(context->fileOutput);
