@@ -318,6 +318,19 @@ def press_key(key):
     subprocess.run(["xdotool", "keyup", key], env=env, check=True)
 
 
+def decodable_frames(path):
+    """Video frames ffmpeg can decode; works on files still being written,
+    which may not have a duration yet."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+         "-show_entries", "stream=nb_read_frames", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    streams = json.loads(result.stdout or "{}").get("streams", []) if result.returncode == 0 else []
+    return int(streams[0].get("nb_read_frames", 0)) if streams else 0
+
+
 def wait_for_files(obs, subdir, count, timeout=15):
     """Waits until `count` files exist and every one of them is readable."""
 
@@ -503,6 +516,23 @@ def case_same_filename_does_not_collide(obs):
     check(names == ["shared name (2).mkv", "shared name.mkv"], f"expected two recordings, got {names}")
     for f in files:
         check((probe_duration(f) or 0) > 1, f"{f.name} is not a full recording")
+
+
+def case_crash_safe_formats_readable_while_recording(obs):
+    """A file that survives OBS dying can already be read while it is being
+    written. fragmented_mp4/mov used to produce a plain MP4/MOV, which cannot."""
+    formats = ["mkv", "fragmented_mp4", "fragmented_mov", "hybrid_mp4", "hybrid_mov"]
+    for fmt in formats:
+        obs.add_color_source(fmt)
+        obs.add_filter(fmt, "Source Record", rec_format=fmt, filename_formatting=fmt, bitrate=4000)
+        obs.set_filter(fmt, "Source Record", record_mode=RECORD_MODE_ALWAYS)
+    time.sleep(6)
+    unreadable = [fmt for fmt in formats if not (obs.files(fmt) and decodable_frames(obs.files(fmt)[0]))]
+    for fmt in formats:
+        obs.set_filter(fmt, "Source Record", record_mode=RECORD_MODE_NONE)
+    for fmt in formats:
+        wait_for_files(obs, fmt, 1)
+    check(not unreadable, f"not readable while recording: {unreadable}")
 
 
 def case_startup_shutdown(obs):

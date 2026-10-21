@@ -577,6 +577,10 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(format));
 	obs_data_set_bool(s, "allow_spaces", true);
+	/* What OBS itself passes for its fragmented formats. Without it the muxer
+	 * writes a plain MP4/MOV, which is lost entirely if OBS dies mid-recording. */
+	if (strcmp(format, "fragmented_mp4") == 0 || strcmp(format, "fragmented_mov") == 0)
+		obs_data_set_string(s, "muxer_settings", "movflags=frag_keyframe+empty_moov+delay_moov");
 	/* The outputs ignore manual splits unless split_file is on, so it always
 	 * is; the checkbox only decides whether the size and time limits apply. */
 	const bool auto_split = obs_data_get_bool(settings, "split_file");

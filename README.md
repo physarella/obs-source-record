@@ -36,7 +36,15 @@ Fixed:
   as shown once nothing records them.
 - Two filters with the same folder and filename pattern no longer write the
   same file; the second gets a " (2)" suffix (#181, #105).
+- The fragmented_mp4 and fragmented_mov formats were written as plain MP4
+  and MOV, so a crash lost the whole recording. They are now fragmented, as
+  in OBS's own settings.
 - Builds against OBS 32.2 (#186).
+
+If OBS or the whole machine dies mid-recording, mkv, hybrid_mp4, hybrid_mov,
+fragmented_mp4 and fragmented_mov keep everything up to the last fraction of
+a second; plain mp4 and mov are lost. (Tested by killing OBS and its
+obs-ffmpeg-mux helpers 20 seconds into a recording.)
 
 Issue numbers refer to the [upstream tracker](https://github.com/exeldro/obs-source-record/issues).
 
