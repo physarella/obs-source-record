@@ -143,9 +143,11 @@ obs_output_t *combined_output(struct source_record_filter_context *context)
 	return result;
 }
 
+/* Not obs_encoder_video() == video_output: with a frame rate divisor that
+ * returns the encoder's own reduced-rate video, so it never matches. */
 static bool member_ready(struct source_record_filter_context *context)
 {
-	return context->video_output && context->encoder && obs_encoder_video(context->encoder) == context->video_output;
+	return context->video_output && context->encoder;
 }
 
 static int compare_by_source_name(const void *a, const void *b)
@@ -154,7 +156,7 @@ static int compare_by_source_name(const void *a, const void *b)
 	struct source_record_filter_context *const *cb = b;
 	const char *na = obs_source_get_name(obs_filter_get_parent((*ca)->source));
 	const char *nb = obs_source_get_name(obs_filter_get_parent((*cb)->source));
-	return strcmp(na ? na : "", nb ? nb : "");
+	return astrcmpi(na ? na : "", nb ? nb : "");
 }
 
 static obs_output_t *create_output(struct source_record_filter_context *first)

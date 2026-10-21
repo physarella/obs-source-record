@@ -295,6 +295,17 @@ class Obs:
             {"sourceName": source, "filterName": name, "filterKind": "source_record_filter", "filterSettings": defaults},
         )
 
+    @contextlib.contextmanager
+    def temporary_sources(self, *names):
+        """Removes the sources afterwards, so a case's combined filters cannot
+        join the next case's file."""
+        try:
+            yield
+        finally:
+            for name in names:
+                with contextlib.suppress(Exception):
+                    self.request("RemoveInput", {"inputName": name})
+
     def set_filter(self, source, name, **settings):
         self.request(
             "SetSourceFilterSettings",
@@ -330,7 +341,8 @@ def press_key(key):
 def probe_streams(path):
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-count_frames", "-show_entries",
-         "stream=codec_type,width,height,nb_read_frames,start_time,duration:stream_tags", "-of", "json", str(path)],
+         "stream=codec_type,width,height,nb_read_frames,start_time,duration,r_frame_rate:stream_tags",
+         "-of", "json", str(path)],
         capture_output=True,
         text=True,
     )
@@ -555,7 +567,13 @@ def case_crash_safe_formats_readable_while_recording(obs):
 
 
 def mp4_finished(path):
-    """A Hybrid MP4 swaps the iso6 brand for obs1 when it is finalised."""
+    """A Hybrid MP4 swaps the iso6 brand for obs1 when it is finalised. The
+    writer thread may still be flushing the rest, so the size must also have
+    stopped changing."""
+    size = path.stat().st_size
+    time.sleep(0.5)
+    if path.stat().st_size != size:
+        return False
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format_tags=compatible_brands", "-of", "json", str(path)],
         capture_output=True,
@@ -575,31 +593,32 @@ BLUE = 0xFFFF0000
 def case_combined_file_has_track_per_source(obs):
     """Filters with "combined" set share one Hybrid MP4, one video and one
     audio track per source, in source-name order."""
-    shared = {"path": str(obs.out / "Combined"), "record_mode": RECORD_MODE_MANUAL, "combined_file": True}
-    obs.add_color_source("Combined Red", size=(320, 240), color=RED)
-    obs.add_color_source("Combined Blue", size=(640, 360), color=BLUE)
-    obs.add_filter("Combined Red", "Source Record", **shared)
-    obs.add_filter("Combined Blue", "Source Record", **shared)
-    obs.hotkey("source_record.Start")
-    check(wait_until(lambda: obs.files("Combined"), 5), "no combined file appeared")
-    time.sleep(3)
-    obs.hotkey("source_record.Stop")
-    files = wait_for_files(obs, "Combined", 1)
-    check(len(files) == 1 and files[0].suffix == ".mp4", f"expected one mp4, got {[f.name for f in files]}")
-    check(wait_until(lambda: mp4_finished(files[0]), 5), "the combined file was not finalised after Stop")
-    streams = probe_streams(files[0])
-    print("      " + "; ".join(f"{s['codec_type']} {s.get('width', '')}x{s.get('height', '')} "
-                              f"{s.get('nb_read_frames')} {s.get('tags', {})}" for s in streams))
-    video = [(s["width"], s["height"]) for s in streams if s["codec_type"] == "video"]
-    audio = [s for s in streams if s["codec_type"] == "audio"]
-    check(video == [(640, 360), (320, 240)], f"video tracks: {video}")
-    check(len(audio) == 2, f"expected 2 audio tracks, got {len(audio)}")
-    timing = [(float(s["start_time"]), float(s["duration"])) for s in streams if s["codec_type"] == "video"]
-    starts = [t[0] for t in timing]
-    ends = [t[0] + t[1] for t in timing]
-    check(max(starts) - min(starts) < 0.1 and max(ends) - min(ends) < 0.1, f"video tracks out of step: {timing}")
-    for name in ("Combined Red", "Combined Blue"):
-        check(not obs.files(name), f"{name} also wrote its own file")
+    with obs.temporary_sources('Combined Red', 'Combined Blue'):
+        shared = {"path": str(obs.out / "Combined"), "record_mode": RECORD_MODE_MANUAL, "combined_file": True}
+        obs.add_color_source("Combined Red", size=(320, 240), color=RED)
+        obs.add_color_source("Combined Blue", size=(640, 360), color=BLUE)
+        obs.add_filter("Combined Red", "Source Record", **shared)
+        obs.add_filter("Combined Blue", "Source Record", **shared)
+        obs.hotkey("source_record.Start")
+        check(wait_until(lambda: obs.files("Combined"), 5), "no combined file appeared")
+        time.sleep(3)
+        obs.hotkey("source_record.Stop")
+        files = wait_for_files(obs, "Combined", 1)
+        check(len(files) == 1 and files[0].suffix == ".mp4", f"expected one mp4, got {[f.name for f in files]}")
+        check(wait_until(lambda: mp4_finished(files[0]), 5), "the combined file was not finalised after Stop")
+        streams = probe_streams(files[0])
+        print("      " + "; ".join(f"{s['codec_type']} {s.get('width', '')}x{s.get('height', '')} "
+                                  f"{s.get('nb_read_frames')} {s.get('tags', {})}" for s in streams))
+        video = [(s["width"], s["height"]) for s in streams if s["codec_type"] == "video"]
+        audio = [s for s in streams if s["codec_type"] == "audio"]
+        check(video == [(640, 360), (320, 240)], f"video tracks: {video}")
+        check(len(audio) == 2, f"expected 2 audio tracks, got {len(audio)}")
+        timing = [(float(s["start_time"]), float(s["duration"])) for s in streams if s["codec_type"] == "video"]
+        starts = [t[0] for t in timing]
+        ends = [t[0] + t[1] for t in timing]
+        check(max(starts) - min(starts) < 0.1 and max(ends) - min(ends) < 0.1, f"video tracks out of step: {timing}")
+        for name in ("Combined Red", "Combined Blue"):
+            check(not obs.files(name), f"{name} also wrote its own file")
 
 
 def video_starts_clean(path, index):
@@ -619,25 +638,55 @@ def video_starts_clean(path, index):
 def case_combined_file_split_all(obs):
     """Split All on a combined recording: two finished files, every track of
     both starting on a keyframe."""
-    shared = {"path": str(obs.out / "Combined Split"), "record_mode": RECORD_MODE_MANUAL, "combined_file": True}
-    obs.add_color_source("Split Red", size=(320, 240), color=RED)
-    obs.add_color_source("Split Blue", size=(640, 360), color=BLUE)
-    obs.add_filter("Split Red", "Source Record", **shared)
-    obs.add_filter("Split Blue", "Source Record", **shared)
-    obs.hotkey("source_record.Start")
-    check(wait_until(lambda: obs.files("Combined Split"), 5), "no combined file appeared")
-    time.sleep(3)
-    obs.hotkey("source_record.SplitAll")
-    time.sleep(3)
-    obs.hotkey("source_record.Stop")
-    files = wait_for_files(obs, "Combined Split", 2)
-    check(len(files) == 2, f"expected 2 files after one split, got {[f.name for f in files]}")
-    for f in files:
-        check(wait_until(lambda: mp4_finished(f), 5), f"{f.name} was not finalised")
-        video = [s for s in probe_streams(f) if s["codec_type"] == "video"]
-        check(len(video) == 2, f"{f.name}: expected 2 video tracks, got {len(video)}")
-        for index in range(2):
-            check(video_starts_clean(f, index), f"{f.name}: video track {index} does not start on a keyframe")
+    with obs.temporary_sources('Split Red', 'Split Blue'):
+        shared = {"path": str(obs.out / "Combined Split"), "record_mode": RECORD_MODE_MANUAL, "combined_file": True}
+        obs.add_color_source("Split Red", size=(320, 240), color=RED)
+        obs.add_color_source("Split Blue", size=(640, 360), color=BLUE)
+        obs.add_filter("Split Red", "Source Record", **shared)
+        obs.add_filter("Split Blue", "Source Record", **shared)
+        obs.hotkey("source_record.Start")
+        check(wait_until(lambda: obs.files("Combined Split"), 5), "no combined file appeared")
+        time.sleep(3)
+        obs.hotkey("source_record.SplitAll")
+        time.sleep(3)
+        obs.hotkey("source_record.Stop")
+        files = wait_for_files(obs, "Combined Split", 2)
+        check(len(files) == 2, f"expected 2 files after one split, got {[f.name for f in files]}")
+        for f in files:
+            check(wait_until(lambda: mp4_finished(f), 5), f"{f.name} was not finalised")
+            video = [s for s in probe_streams(f) if s["codec_type"] == "video"]
+            check(len(video) == 2, f"{f.name}: expected 2 video tracks, got {len(video)}")
+            for index in range(2):
+                check(video_starts_clean(f, index), f"{f.name}: video track {index} does not start on a keyframe")
+
+
+def case_combined_file_mixed_frame_rates(obs):
+    """A source at half the frame rate (like a 30 fps camera on a 60 fps
+    canvas) stays in sync, and a split still starts every track on a keyframe."""
+    shared = {"path": str(obs.out / "Mixed"), "record_mode": RECORD_MODE_MANUAL, "combined_file": True}
+    with obs.temporary_sources("Mixed Cam", "Mixed Screen"):
+        obs.add_color_source("Mixed Cam", size=(320, 240), color=RED)
+        obs.add_color_source("Mixed Screen", size=(640, 360), color=BLUE)
+        obs.add_filter("Mixed Cam", "Source Record", frame_rate_divisor=2, **shared)
+        obs.add_filter("Mixed Screen", "Source Record", **shared)
+        obs.hotkey("source_record.Start")
+        check(wait_until(lambda: obs.files("Mixed"), 5), "no combined file appeared")
+        time.sleep(3)
+        obs.hotkey("source_record.SplitAll")
+        time.sleep(3)
+        obs.hotkey("source_record.Stop")
+        files = wait_for_files(obs, "Mixed", 2)
+        check(len(files) == 2, f"expected 2 files after one split, got {[f.name for f in files]}")
+        for f in files:
+            check(wait_until(lambda: mp4_finished(f), 5), f"{f.name} was not finalised")
+            video = [s for s in probe_streams(f) if s["codec_type"] == "video"]
+            check([v["tags"]["name"] for v in video] == ["Mixed Cam", "Mixed Screen"], f"track order: {video}")
+            fps = [v["r_frame_rate"] for v in video]
+            check(fps == ["15/1", "30/1"], f"{f.name}: expected 15 and 30 fps tracks, got {fps}")
+            ends = [float(v["start_time"]) + float(v["duration"]) for v in video]
+            check(abs(ends[0] - ends[1]) < 0.1, f"{f.name}: tracks end apart: {ends}")
+            for index in range(2):
+                check(video_starts_clean(f, index), f"{f.name}: video track {index} does not start on a keyframe")
 
 
 def case_combined_file_finished_on_exit(obs):
