@@ -531,6 +531,7 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(format));
+	obs_data_set_bool(s, "allow_spaces", true);
 	obs_data_set_bool(s, "split_file", obs_data_get_bool(settings, "split_file"));
 	obs_data_set_int(s, "max_size_mb", obs_data_get_int(settings, "max_size_mb"));
 	obs_data_set_int(s, "max_time_sec", obs_data_get_int(settings, "max_time_sec"));

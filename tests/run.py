@@ -256,6 +256,23 @@ def wait_for_files(obs, subdir, count, timeout=15):
 # --- cases ------------------------------------------------------------------
 
 
+def case_split_keeps_spaces(obs):
+    """Upstream #164: split files lost the spaces of the filename format."""
+    obs.add_color_source("Split Cam")
+    obs.add_filter("Split Cam", "Source Record", split_file=True, max_time_sec=0, max_size_mb=0)
+    obs.set_filter("Split Cam", "Source Record", record_mode=RECORD_MODE_ALWAYS)
+    time.sleep(2.5)
+    reply = obs.vendor("record_split", {"source": "Split Cam"})
+    check(reply.get("success"), f"record_split failed: {reply}")
+    time.sleep(2.5)
+    obs.set_filter("Split Cam", "Source Record", record_mode=RECORD_MODE_NONE)
+    files = wait_for_files(obs, "Split Cam", 2)
+    names = [f.name for f in files]
+    check(len(files) == 2, f"expected 2 files after one split, got {names}")
+    for name in names:
+        check(" Split Cam" in name, f"spaces were replaced in {name!r}")
+
+
 def case_startup_shutdown(obs):
     """Baseline: OBS with one plain source must start and exit cleanly."""
     obs.add_color_source("Idle Cam")
