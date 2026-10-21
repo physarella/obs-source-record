@@ -256,6 +256,10 @@ jobs:
     name: 'Windows Package'
     runs-on: [windows-latest]
     needs: [windows-build]
+    # Deleting the per-architecture artifacts needs write access; a fork's
+    # default token is read-only.
+    permissions:
+      actions: write
     steps:
       - name: Init
         if: success()
