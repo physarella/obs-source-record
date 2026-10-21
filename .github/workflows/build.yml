@@ -142,7 +142,7 @@ jobs:
         run: |
           sudo add-apt-repository --yes ppa:obsproject/obs-studio
           sudo apt-get update
-          sudo apt-get install --yes obs-studio cmake ninja-build
+          sudo apt-get install --yes obs-studio libsimde-dev cmake ninja-build
       - name: Build
         run: |
           cmake -S . -B build -G Ninja -DBUILD_OUT_OF_TREE=On -DCMAKE_BUILD_TYPE=RelWithDebInfo
