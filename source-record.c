@@ -6,6 +6,7 @@
 #include <util/dstr.h>
 #include "version.h"
 #include "obs-websocket-api.h"
+#include "source-record.h"
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -17,6 +18,7 @@
 #define OUTPUT_MODE_RECORDING 3
 #define OUTPUT_MODE_STREAMING_OR_RECORDING 4
 #define OUTPUT_MODE_VIRTUAL_CAMERA 5
+#define OUTPUT_MODE_MANUAL 6
 
 #define BACKGROUND_CHANNEL 0
 #define SOURCE_CHANNEL 1
@@ -883,6 +885,40 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 	filter->audio_track = audio_track;
 }
 
+/* last_event closes the window in which obs_frontend_*_active() still
+ * reports true while the output is already stopping. */
+static bool frontend_streaming(int last_event)
+{
+	return obs_frontend_streaming_active() && last_event != OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
+	       last_event != OBS_FRONTEND_EVENT_STREAMING_STOPPED;
+}
+
+static bool frontend_recording(int last_event)
+{
+	return obs_frontend_recording_active() && last_event != OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
+	       last_event != OBS_FRONTEND_EVENT_RECORDING_STOPPED;
+}
+
+static bool output_mode_active(long long mode, int last_event)
+{
+	switch (mode) {
+	case OUTPUT_MODE_ALWAYS:
+		return true;
+	case OUTPUT_MODE_STREAMING:
+		return frontend_streaming(last_event);
+	case OUTPUT_MODE_RECORDING:
+		return frontend_recording(last_event);
+	case OUTPUT_MODE_STREAMING_OR_RECORDING:
+		return frontend_streaming(last_event) || frontend_recording(last_event);
+	case OUTPUT_MODE_VIRTUAL_CAMERA:
+		return obs_frontend_virtualcam_active() && last_event != OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED;
+	case OUTPUT_MODE_MANUAL:
+		return source_record_manual_active();
+	default:
+		return false;
+	}
+}
+
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
@@ -914,24 +950,9 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	if (!filter->closing && (record_mode != OUTPUT_MODE_NONE || stream_mode != OUTPUT_MODE_NONE || replay_buffer)) {
 		update_encoder(filter, settings);
 	}
-	bool record = false;
-	if (filter->closing) {
-	} else if (record_mode == OUTPUT_MODE_ALWAYS) {
-		record = true;
-	} else if (record_mode == OUTPUT_MODE_RECORDING) {
-		record = obs_frontend_recording_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
-			 filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPED;
-	} else if (record_mode == OUTPUT_MODE_STREAMING) {
-		record = obs_frontend_streaming_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
-			 filter->last_frontend_event != OBS_FRONTEND_EVENT_STREAMING_STOPPED;
-	} else if (record_mode == OUTPUT_MODE_STREAMING_OR_RECORDING) {
-		record = (obs_frontend_streaming_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
-			  filter->last_frontend_event != OBS_FRONTEND_EVENT_STREAMING_STOPPED) ||
-			 (obs_frontend_recording_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
-			  filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPED);
-	} else if (record_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
-		record = obs_frontend_virtualcam_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED;
-	}
+	const bool follows_frontend = record_mode != OUTPUT_MODE_ALWAYS && record_mode != OUTPUT_MODE_MANUAL;
+	const bool held = follows_frontend && source_record_held();
+	const bool record = !filter->closing && !held && output_mode_active(record_mode, filter->last_frontend_event);
 
 	if (parent && filter->view && (record || replay_buffer)) {
 		obs_source_t *view_source = obs_view_get_source(filter->view, SOURCE_CHANNEL);
@@ -1024,24 +1045,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		obs_data_release(replay_settings);
 	}
 
-	bool stream = false;
-	if (filter->closing) {
-	} else if (stream_mode == OUTPUT_MODE_ALWAYS) {
-		stream = true;
-	} else if (stream_mode == OUTPUT_MODE_RECORDING) {
-		stream = obs_frontend_recording_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
-			 filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPED;
-	} else if (stream_mode == OUTPUT_MODE_STREAMING) {
-		stream = obs_frontend_streaming_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
-			 filter->last_frontend_event != OBS_FRONTEND_EVENT_STREAMING_STOPPED;
-	} else if (stream_mode == OUTPUT_MODE_STREAMING_OR_RECORDING) {
-		stream = (obs_frontend_streaming_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
-			  filter->last_frontend_event != OBS_FRONTEND_EVENT_STREAMING_STOPPED) ||
-			 (obs_frontend_recording_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
-			  filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPED);
-	} else if (stream_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
-		stream = obs_frontend_virtualcam_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED;
-	}
+	const bool stream = !filter->closing && output_mode_active(stream_mode, filter->last_frontend_event);
 
 	if (parent && filter->view && stream) {
 		obs_source_t *view_source = obs_view_get_source(filter->view, SOURCE_CHANNEL);
@@ -1713,6 +1717,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_property_list_add_int(p, obs_module_text("Recording"), OUTPUT_MODE_RECORDING);
 	obs_property_list_add_int(p, obs_module_text("StreamingOrRecording"), OUTPUT_MODE_STREAMING_OR_RECORDING);
 	obs_property_list_add_int(p, obs_module_text("VirtualCamera"), OUTPUT_MODE_VIRTUAL_CAMERA);
+	obs_property_list_add_int(p, obs_module_text("Manual"), OUTPUT_MODE_MANUAL);
 
 	obs_properties_add_path(record, "path", obs_module_text("Path"), OBS_PATH_DIRECTORY, NULL, NULL);
 	obs_properties_add_text(record, "filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
@@ -2636,6 +2641,88 @@ static void websocket_stop_stream(obs_data_t *request_data, obs_data_t *response
 	obs_data_set_bool(response_data, "success", success);
 }
 
+static void collect_filter(obs_source_t *parent, obs_source_t *child, void *param)
+{
+	UNUSED_PARAMETER(parent);
+	if (strcmp(obs_source_get_unversioned_id(child), "source_record_filter") != 0)
+		return;
+	obs_source_t *ref = obs_source_get_ref(child);
+	if (ref) {
+		DARRAY(obs_source_t *) *filters = param;
+		darray_push_back(sizeof(obs_source_t *), &filters->da, &ref);
+	}
+}
+
+static bool collect_filters_of(void *param, obs_source_t *source)
+{
+	obs_source_enum_filters(source, collect_filter, param);
+	return true;
+}
+
+/* Collected first and handled afterwards: obs_source_enum_filters holds the
+ * parent's filter mutex, which an update can need. */
+static void for_each_filter(void (*fn)(obs_source_t *filter, void *param), void *param)
+{
+	DARRAY(obs_source_t *) filters = {0};
+	obs_enum_sources(collect_filters_of, &filters);
+	obs_enum_scenes(collect_filters_of, &filters);
+	for (size_t i = 0; i < filters.num; i++) {
+		fn(filters.array[i], param);
+		obs_source_release(filters.array[i]);
+	}
+	da_free(filters);
+}
+
+static void update_filter(obs_source_t *filter, void *param)
+{
+	UNUSED_PARAMETER(param);
+	obs_source_update(filter, NULL);
+}
+
+void source_record_update_all(void)
+{
+	for_each_filter(update_filter, NULL);
+}
+
+static obs_output_t *active_file_output(obs_source_t *filter)
+{
+	struct source_record_filter_context *context = obs_obj_get_data(filter);
+	if (!context || !context->fileOutput || !obs_output_active(context->fileOutput))
+		return NULL;
+	return context->fileOutput;
+}
+
+static void split_filter(obs_source_t *filter, void *param)
+{
+	UNUSED_PARAMETER(param);
+	obs_output_t *output = active_file_output(filter);
+	if (!output)
+		return;
+	struct calldata cd;
+	calldata_init(&cd);
+	proc_handler_call(obs_output_get_proc_handler(output), "split_file", &cd);
+	calldata_free(&cd);
+}
+
+void source_record_split_all(void)
+{
+	for_each_filter(split_filter, NULL);
+}
+
+static void note_recording(obs_source_t *filter, void *param)
+{
+	bool *any = param;
+	if (active_file_output(filter))
+		*any = true;
+}
+
+bool source_record_any_recording(void)
+{
+	bool any = false;
+	for_each_filter(note_recording, &any);
+	return any;
+}
+
 bool obs_module_load(void)
 {
 	blog(LOG_INFO, "[Source Record] loaded version %s", PROJECT_VERSION);
@@ -2656,6 +2743,7 @@ bool obs_module_load(void)
 	obs_websocket_vendor_register_request(vendor, "stream_start", websocket_start_stream, NULL);
 	obs_websocket_vendor_register_request(vendor, "stream_stop", websocket_stop_stream, NULL);
 
+	source_record_controls_load();
 	return true;
 }
 
@@ -2677,6 +2765,7 @@ void obs_module_post_load(void)
 
 void obs_module_unload(void)
 {
+	source_record_controls_unload();
 	da_free(source_record_filters);
 }
 

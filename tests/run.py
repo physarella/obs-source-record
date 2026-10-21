@@ -25,6 +25,7 @@ import obsws_python as obsws
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 WS_PORT = 4466
+RTMP_PORT = 19350
 X_DISPLAY = ":97"
 CANVAS = (320, 240)
 
@@ -32,6 +33,7 @@ RECORD_MODE_NONE = 0
 RECORD_MODE_ALWAYS = 1
 RECORD_MODE_STREAMING = 2
 RECORD_MODE_RECORDING = 3
+RECORD_MODE_MANUAL = 6
 
 PROFILE_INI = """\
 [General]
@@ -56,6 +58,9 @@ RecQuality=Stream
 StreamEncoder=x264
 VBitrate=300
 Preset=ultrafast
+
+[Hotkeys]
+source_record.Toggle={{"bindings":[{{"key":"OBS_KEY_F9"}}]}}
 """
 
 USER_INI = """\
@@ -171,6 +176,48 @@ class Obs:
         self.log.close()
         return self.proc.returncode
 
+    def hotkey(self, name):
+        """Fires a hotkey the way obs-wayland-hotkeys does: press, then release."""
+        self.request("TriggerHotkeyByName", {"hotkeyName": name})
+
+    def recording(self):
+        return self.request("GetRecordStatus")["outputActive"]
+
+    def streaming(self):
+        return self.request("GetStreamStatus")["outputActive"]
+
+    @contextlib.contextmanager
+    def stream_to_local_server(self):
+        """Streams to an ffmpeg RTMP listener that discards what it receives."""
+        server = subprocess.Popen(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-listen", "1",
+             "-i", f"rtmp://127.0.0.1:{RTMP_PORT}/live/test", "-c", "copy", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(1)
+            self.request(
+                "SetStreamServiceSettings",
+                {
+                    "streamServiceType": "rtmp_custom",
+                    "streamServiceSettings": {"server": f"rtmp://127.0.0.1:{RTMP_PORT}/live", "key": "test"},
+                },
+            )
+            self.request("StartStream")
+            check(wait_until(self.streaming, 10), "the stream did not start")
+            yield
+        finally:
+            with contextlib.suppress(Exception):
+                self.request("StopStream")
+            wait_until(lambda: not self.streaming(), 10)
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait()
+
     def showing(self, source):
         return self.request("GetSourceActive", {"sourceName": source})["videoShowing"]
 
@@ -256,6 +303,14 @@ def probe_duration(path):
     return float(duration) if duration else None
 
 
+def press_key(key):
+    """Held long enough for OBS's hotkey thread, which polls every 25 ms."""
+    env = dict(os.environ, DISPLAY=X_DISPLAY)
+    subprocess.run(["xdotool", "keydown", key], env=env, check=True)
+    time.sleep(0.2)
+    subprocess.run(["xdotool", "keyup", key], env=env, check=True)
+
+
 def wait_for_files(obs, subdir, count, timeout=15):
     """Waits until `count` files exist and every one of them is readable."""
 
@@ -335,6 +390,81 @@ def case_deleted_source_is_freed(obs):
     # Freed or not is only visible at exit: see remaining_sources().
 
 
+def case_manual_mode_records_only_sources(obs):
+    """Upstream #146: record the sources without OBS's own recording."""
+    obs.add_color_source("Solo Cam")
+    obs.add_filter("Solo Cam", "Source Record", record_mode=RECORD_MODE_MANUAL)
+    obs.add_color_source("Bystander Cam")
+    obs.add_filter("Bystander Cam", "Source Record", record_mode=RECORD_MODE_RECORDING)
+    time.sleep(1.5)
+    check(not obs.files("Solo Cam"), "a Manual filter recorded before Start")
+
+    obs.hotkey("source_record.Start")
+    check(wait_until(lambda: obs.files("Solo Cam"), 5), "Start did not begin a recording")
+    time.sleep(2)
+    obs.hotkey("source_record.Stop")
+    check(len(wait_for_files(obs, "Solo Cam", 1)) == 1, "Stop did not finalize the recording")
+
+    obs.hotkey("source_record.Toggle")
+    check(wait_until(lambda: len(obs.files("Solo Cam")) == 2, 5), "Toggle did not begin a second recording")
+    time.sleep(2)
+    obs.hotkey("source_record.Toggle")
+    files = wait_for_files(obs, "Solo Cam", 2)
+    check(len(files) == 2, f"Toggle did not finalize the second recording: {[f.name for f in files]}")
+    check(not obs.recording() and not obs.files("main"), "OBS's own recording ran")
+    check(not obs.files("Bystander Cam"), "Start recorded a filter whose mode is Recording")
+
+
+def case_saved_binding_survives_restart(obs):
+    """A binding saved in the profile must work after OBS starts (cf. upstream
+    #24). The key goes through X and OBS's own hotkey thread, not websocket."""
+    obs.add_color_source("Key Cam")
+    obs.add_filter("Key Cam", "Source Record", record_mode=RECORD_MODE_MANUAL)
+    time.sleep(1)
+    press_key("F9")
+    check(wait_until(lambda: obs.files("Key Cam"), 5), "F9 (saved Toggle binding) did not start recording")
+    time.sleep(2)
+    press_key("F9")
+    files = wait_for_files(obs, "Key Cam", 1)
+    check(len(files) == 1, f"F9 did not stop the recording: {[f.name for f in files]}")
+
+
+def case_split_all_hotkey(obs):
+    for name in ("Split A", "Split B"):
+        obs.add_color_source(name)
+        obs.add_filter(name, "Source Record", record_mode=RECORD_MODE_MANUAL)
+    obs.hotkey("source_record.Start")
+    time.sleep(2.5)
+    obs.hotkey("source_record.SplitAll")
+    time.sleep(2.5)
+    obs.hotkey("source_record.Stop")
+    for name in ("Split A", "Split B"):
+        files = wait_for_files(obs, name, 2)
+        check(len(files) == 2, f"{name}: expected 2 files after Split All, got {[f.name for f in files]}")
+
+
+def case_stop_and_restart_while_streaming(obs):
+    """Stop the source recording mid-stream and start a new file, stream untouched."""
+    obs.add_color_source("Stream Cam")
+    obs.add_filter("Stream Cam", "Source Record", record_mode=RECORD_MODE_STREAMING)
+    with obs.stream_to_local_server():
+        check(wait_until(lambda: obs.files("Stream Cam"), 5), "Streaming mode did not record")
+        time.sleep(2)
+        obs.hotkey("source_record.Stop")
+        check(len(wait_for_files(obs, "Stream Cam", 1)) == 1, "Stop did not finalize the recording")
+        check(obs.streaming(), "Stop ended the stream")
+        time.sleep(1)
+        check(len(obs.files("Stream Cam")) == 1, "the recording restarted by itself while held")
+
+        obs.hotkey("source_record.Start")
+        check(wait_until(lambda: len(obs.files("Stream Cam")) == 2, 5), "Start did not begin a new file")
+        time.sleep(2)
+        check(obs.streaming(), "the stream stopped")
+    obs.hotkey("source_record.Stop")
+    files = wait_for_files(obs, "Stream Cam", 2)
+    check(len(files) == 2, f"expected 2 files, got {[f.name for f in files]}")
+
+
 def case_startup_shutdown(obs):
     """Baseline: OBS with one plain source must start and exit cleanly."""
     obs.add_color_source("Idle Cam")
@@ -391,11 +521,12 @@ def main():
         obs.start()
         for name in selected:
             try:
+                started = time.monotonic()
                 CASES[name](obs)
-                print(f"PASS  {name}")
+                print(f"PASS  {name} ({time.monotonic() - started:.0f} s)", flush=True)
             except Failure as e:
                 failures.append(name)
-                print(f"FAIL  {name}: {e}")
+                print(f"FAIL  {name}: {e}", flush=True)
             except Exception:
                 failures.append(name)
                 print(f"ERROR {name}:\n{traceback.format_exc()}")

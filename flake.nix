@@ -39,6 +39,7 @@
         packages = [
           (pkgs.python3.withPackages (p: [ p.obsws-python ]))
           pkgs.xvfb
+          pkgs.xdotool
           pkgs.ffmpeg-headless
           nixgl.packages.${system}.nixGLIntel
         ];
