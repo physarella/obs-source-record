@@ -689,6 +689,40 @@ def case_combined_file_mixed_frame_rates(obs):
                 check(video_starts_clean(f, index), f"{f.name}: video track {index} does not start on a keyframe")
 
 
+def case_source_resizes_while_recording(obs):
+    """Your 17 and 20 Oct crashes: the PipeWire capture changed size mid-
+    recording and 0.4.8 freed the video under the running encoder, crashing
+    when that encoder stopped (upstream #166, #179)."""
+    obs.add_color_source("Resizing Cam", size=(640, 360))
+    obs.add_filter("Resizing Cam", "Source Record", record_mode=RECORD_MODE_ALWAYS)
+    check(wait_until(lambda: obs.files("Resizing Cam"), 5), "the recording did not start")
+    sizes = [(800, 450), (640, 360)]
+    for i in range(4):
+        time.sleep(1.5)
+        w, h = sizes[i % 2]
+        obs.request("SetInputSettings", {"inputName": "Resizing Cam", "inputSettings": {"width": w, "height": h}})
+    time.sleep(2)
+    obs.set_filter("Resizing Cam", "Source Record", record_mode=RECORD_MODE_NONE)
+    time.sleep(2)
+    check(obs.proc.poll() is None, "OBS crashed")
+    files = wait_for_files(obs, "Resizing Cam", 2)
+    check(len(files) >= 2, f"expected a new file after each resize, got {[f.name for f in files]}")
+
+
+def case_recording_left_running_at_exit(obs):
+    """Quitting OBS while a normal recording runs: clean exit, playable file."""
+    obs.add_color_source("Exit Cam")
+    obs.add_filter("Exit Cam", "Source Record", record_mode=RECORD_MODE_ALWAYS)
+    check(wait_until(lambda: obs.files("Exit Cam"), 5), "the recording did not start")
+    time.sleep(2)
+
+    def playable_after_exit():
+        files = obs.files("Exit Cam")
+        check(len(files) == 1 and decodable_frames(files[0]) > 30, f"not playable after exit: {[f.name for f in files]}")
+
+    AFTER_EXIT.append(("recording_left_running_at_exit", playable_after_exit))
+
+
 def case_combined_file_finished_on_exit(obs):
     """Quitting OBS mid-recording must finish the combined file, not hang."""
     obs.add_color_source("Exit Red", color=RED)
