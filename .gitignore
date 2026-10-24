@@ -15,3 +15,6 @@
 # integration test runs
 /tests/runs/
 __pycache__/
+
+# built Blender extension
+/dist/

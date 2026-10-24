@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+
+id = "combined_tracks"
+version = "1.0.0"
+name = "Combined Recording Tracks"
+tagline = "Pick and check which audio track each sound strip plays"
+maintainer = "Physarella"
+type = "add-on"
+
+blender_version_min = "5.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Reads track names from movie files with ffprobe"

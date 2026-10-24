@@ -101,8 +101,20 @@ that moment, and turned into an ordinary MP4 when recording stops.
   next keyframe.
 
 In Blender 5.2's Video Sequencer, Add > Movie loads every video and audio
-track of the file as its own strip, already lined up, with no further steps.
-Set the scene to the recording's frame rate first.
+track of the file as its own strip, already lined up. Set the scene to the
+recording's frame rate first.
+
+Blender stores which audio track a sound strip plays but shows it nowhere,
+and an edit can reset it to the first track: the strip then keeps showing
+the right waveform but plays the first track (seen in 5.2.2). The add-on in
+[`blender/combined_tracks`](blender/combined_tracks) shows the track of each
+sound strip under Strip > Sound > Audio Track, lets you change it, warns when
+two strips play the same track at the same time (also when a file is
+opened), and can name strips after their OBS sources. Install the zip from
+`dist/` (or build it with `blender --command extension build`) through
+Preferences > Get Extensions > Install from Disk. It needs ffprobe for the
+track names and was written for Blender 5.2; on a Blender whose memory
+layout differs it refuses to change anything.
 
 ## Hotkeys
 
